@@ -1,0 +1,28 @@
+[package]
+name = "unidpp-archive"
+description = "UniDPP Tier-C notarized archive service: as-of snapshot packs with ISO 14721 (OAIS)-style submission/information-package/provenance metadata, Ed25519 notarization in the tree-head domain (unidpp-signatif), optional transparency-log anchoring (unidpp-log commitments), byte-identical re-serving, JSONL journal + file snapshot store with restart replay"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/unidpp/unidpp-archive"
+rust-version = "1.75"
+
+# Dependency-light on purpose (mirrors the unidpp-registry /
+# unidpp-resolver / unidpp-trust / unidpp-log doctrine): axum/tokio for
+# serving, serde_json for documents, and a hand-rolled http:// client
+# for the log-anchoring hop. All timestamping, signature and anchoring
+# machinery lives in the path-dependency crates; this service is the
+# HTTP projection of the archival (Tier-C) tier. No tracing, no
+# metrics, no TLS stack (terminate at a fronting proxy), no database
+# (the JSONL journal is the storage, the snapshot files are the AIPs).
+[dependencies]
+unidpp-model = { path = "../unidpp-core/crates/model" }
+unidpp-signatif = { path = "../unidpp-signatif" }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread", "time", "sync"] }
+serde_json = "1"
+
+# Integration tests spawn a real unidpp-log instance to prove the
+# anchoring path end-to-end (receipt chain, fallback semantics).
+[dev-dependencies]
+unidpp-log = { path = "../unidpp-log" }
