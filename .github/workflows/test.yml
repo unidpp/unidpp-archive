@@ -7,7 +7,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Path dependencies live in the sibling repos — check them out
+      # side by side (the family layout).
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: unidpp/unidpp-core
+          path: unidpp-core
+      - uses: actions/checkout@v4
+        with:
+          repository: unidpp/unidpp-signatif
+          path: unidpp-signatif
+      - uses: actions/checkout@v4
+        with:
+          repository: unidpp/unidpp-log
+          path: unidpp-log
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
