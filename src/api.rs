@@ -375,6 +375,8 @@ fn parse_create_request(v: &Value) -> Result<CreateRequest, String> {
 async fn discovery(State(app): State<Arc<AppState>>) -> Response {
     let body = json!({
         "service": SERVICE_ID,
+        "version": env!("CARGO_PKG_VERSION"),
+        "build_id": option_env!("UNIDPP_BUILD_ID").unwrap_or("dev"),
         "description": "UniDPP Tier-C notarized archive: as-of snapshot packs with OAIS-style metadata, Ed25519 notarization, optional transparency-log anchoring, byte-identical re-serving.",
         "schema": SCHEMA,
         "anchoring_enabled": app.config.log.is_enabled(),
