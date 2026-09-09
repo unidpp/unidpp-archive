@@ -8,8 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Path dependencies live in the sibling repos — check them out
-      # side by side (the family layout).
+      # side by side (the family layout; the repo itself gets an
+      # explicit path so the siblings land BESIDE it, not inside).
       - uses: actions/checkout@v4
+        with:
+          path: unidpp-archive
       - uses: actions/checkout@v4
         with:
           repository: unidpp/unidpp-core
@@ -26,5 +29,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
+        working-directory: unidpp-archive
       - run: cargo clippy --all-targets -- -D warnings
+        working-directory: unidpp-archive
       - run: cargo test --all
+        working-directory: unidpp-archive
