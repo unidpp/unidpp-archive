@@ -106,13 +106,18 @@ impl Keyring {
         })
     }
 
-    /// Resolve a keyring from environment variables. Bad seeds are
-    /// reported via the returned warnings; on any failure the service
-    /// falls back to deterministic dev mode.
-    pub fn from_env(dev_seed: Option<&str>) -> (Keyring, Vec<String>) {
+    /// Resolve a keyring from a pre-collected environment map (the
+    /// deployment contract: the key names are `Config::ENV_KEYS`, and
+    /// the service reads the environment only through that constant).
+    /// Bad seeds are reported via the returned warnings; on any
+    /// failure the service falls back to deterministic dev mode.
+    pub fn from_env_map(
+        dev_seed: Option<&str>,
+        vars: &std::collections::HashMap<&str, String>,
+    ) -> (Keyring, Vec<String>) {
         let mut warnings = Vec::new();
-        match std::env::var("UNIDPP_ARCHIVE_SIGN_SEED").ok() {
-            Some(seed) if !seed.trim().is_empty() => match Keyring::from_env_seed(&seed) {
+        match vars.get("UNIDPP_ARCHIVE_SIGN_SEED").map(String::as_str) {
+            Some(seed) if !seed.trim().is_empty() => match Keyring::from_env_seed(seed) {
                 Ok(k) => (k, warnings),
                 Err(err) => {
                     warnings.push(format!(
@@ -123,6 +128,11 @@ impl Keyring {
             },
             _ => (Keyring::dev(dev_seed), warnings),
         }
+    }
+
+    /// Resolve a keyring from environment variables.
+    pub fn from_env(dev_seed: Option<&str>) -> (Keyring, Vec<String>) {
+        Self::from_env_map(dev_seed, &crate::api::Config::env_values())
     }
 
     pub fn mode(&self) -> KeyringMode {

@@ -1,0 +1,170 @@
+components: {}
+info:
+  description: 'UniDPP Tier-C notarized archive: as-of snapshot packs with ISO 14721 (OAIS) submission, information-package and provenance metadata, Ed25519 notarization in the tree-head domain, optional transparency-log anchoring with an explicit unanchored fallback, byte-identical re-serving pinned by strong entity tags, and an append-only audit journal. Reads are public; ingest and the audit journal require `Authorization: Bearer <UNIDPP_ARCHIVE_ADMIN_TOKEN>` where a token is configured.'
+  license:
+    identifier: Apache-2.0
+    name: Apache-2.0
+  title: UniDPP archive
+  version: 0.1.0
+  x-unidpp-env-keys:
+  - UNIDPP_ARCHIVE_BIND
+  - UNIDPP_ARCHIVE_ADMIN_TOKEN
+  - UNIDPP_ARCHIVE_STATE_FILE
+  - UNIDPP_ARCHIVE_SNAPSHOT_DIR
+  - UNIDPP_ARCHIVE_DEV_SEED
+  - UNIDPP_ARCHIVE_SIGN_SEED
+  - UNIDPP_LOG_URL
+  - UNIDPP_ARCHIVE_LOG_TOKEN
+  - UNIDPP_ARCHIVE_LOG_TIMEOUT_MS
+openapi: 3.1.0
+paths:
+  /:
+    get:
+      operationId: discovery
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The discovery document: the service identity and build, the ISO 14721 (OAIS) role mapping, the notarization suite and statement recipe, the anchoring semantics and the explicit unanchored fallback, the journal and snapshot-store layout, the as-of query conventions and the bearer-guard posture'
+      summary: |-
+        Serve the discovery document: the service identity, the OAIS
+        mapping, the notarization recipe, the anchoring semantics, the
+        storage layout and the entry points.
+      tags:
+      - archive
+  /admin/log:
+    get:
+      operationId: admin_log
+      parameters:
+      - description: Records to return (default 100, maximum 10 000)
+        in: query
+        name: limit
+        required: false
+        schema:
+          format: int64
+          minimum: 0
+          type: integer
+      - description: Records to skip (default 0)
+        in: query
+        name: offset
+        required: false
+        schema:
+          format: int64
+          minimum: 0
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The journal window
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: Read the append-only audit journal.
+      tags:
+      - admin
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The service is serving; the snapshot count and the anchoring posture are stated
+      summary: Serve the liveness document.
+      tags:
+      - archive
+  /keyring:
+    get:
+      operationId: keyring
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The notary anchor: the keyring mode, the suite, the key id, the Ed25519 public anchor, the verification recipe and, in seeded-dev mode, the warning'
+      summary: Serve the notary keyring a verifier pins.
+      tags:
+      - archive
+  /snapshots:
+    get:
+      operationId: list_snapshots
+      parameters:
+      - description: List only the snapshots of this passport
+        in: query
+        name: passport_id
+        required: false
+        schema:
+          type: string
+      - description: 'An RFC 3339 instant; the catalogue is evaluated as of that instant (alias: `asof`), and the answer is immutable and cacheable forever'
+        in: query
+        name: at
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The catalogue: every snapshot notarized at or before the effective instant, with the query echo, the count, the fixity digests, the anchoring summary and the per-snapshot `href`'
+        '400':
+          description: The `at` parameter is not a parseable instant
+      summary: List the snapshots in the as-of catalogue (OAIS data management).
+      tags:
+      - archive
+    post:
+      operationId: create_snapshot
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: 'The SIP: `{"passport_id": ..., "state_hash": ..., "log_head": ...}`; optional `submitter` and `state_size`'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: The snapshot is notarized and stored; the AIP document is returned with the `Location`, `ETag`, `X-Snapshot-Id` and `X-As-Of` headers, and `X-Anchored-Receipt` when the transparency log anchored the commitment
+        '400':
+          description: Invalid JSON, a missing or malformed `passport_id`, `state_hash` or `log_head`, or an invalid optional field
+        '401':
+          description: A bearer token is configured and the request does not carry it
+        '409':
+          description: The storage reports a sequence conflict
+        '500':
+          description: Notarization failed or the storage reported an integrity failure
+      summary: |-
+        Ingest a snapshot: the OAIS submission is notarized into the
+        archival package.
+      tags:
+      - admin
+  /snapshots/{id}:
+    get:
+      operationId: get_snapshot
+      parameters:
+      - description: The snapshot identifier, as returned by the ingest response and the as-of catalogue
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The archival package is re-rendered from the journaled record byte-identically; the strong `ETag` pins the body digest and the `X-As-Of` header carries the notarization instant
+        '404':
+          description: No snapshot carries the requested identifier
+      summary: Re-serve a stored snapshot byte-identically (OAIS access).
+      tags:
+      - archive
+tags:
+- description: 'The public surface: discovery, health, the notary keyring, snapshot access and the as-of catalogue'
+  name: archive
+- description: 'The bearer-guarded surface: OAIS ingest and the audit journal'
+  name: admin

@@ -57,20 +57,24 @@ impl LogAnchorConfig {
         }
     }
 
-    /// Resolve from environment variables.
-    pub fn from_env() -> LogAnchorConfig {
+    /// Resolve from a pre-collected environment map (the deployment
+    /// contract: the key names are `Config::ENV_KEYS`, and the
+    /// service reads the environment only through that constant).
+    pub fn from_env_map(vars: &std::collections::HashMap<&str, String>) -> LogAnchorConfig {
         let mut cfg = LogAnchorConfig::default();
-        if let Ok(url) = std::env::var("UNIDPP_LOG_URL") {
-            if !url.trim().is_empty() {
-                cfg.base_url = Some(url.trim().to_string());
+        if let Some(url) = vars.get("UNIDPP_LOG_URL") {
+            let url = url.trim();
+            if !url.is_empty() {
+                cfg.base_url = Some(url.to_string());
             }
         }
-        if let Ok(token) = std::env::var("UNIDPP_ARCHIVE_LOG_TOKEN") {
-            if !token.trim().is_empty() {
-                cfg.bearer = Some(token.trim().to_string());
+        if let Some(token) = vars.get("UNIDPP_ARCHIVE_LOG_TOKEN") {
+            let token = token.trim();
+            if !token.is_empty() {
+                cfg.bearer = Some(token.to_string());
             }
         }
-        if let Ok(ms) = std::env::var("UNIDPP_ARCHIVE_LOG_TIMEOUT_MS") {
+        if let Some(ms) = vars.get("UNIDPP_ARCHIVE_LOG_TIMEOUT_MS") {
             if let Ok(ms) = ms.trim().parse::<u64>() {
                 if ms > 0 {
                     cfg.timeout = Duration::from_millis(ms);
@@ -78,6 +82,11 @@ impl LogAnchorConfig {
             }
         }
         cfg
+    }
+
+    /// Resolve from environment variables.
+    pub fn from_env() -> LogAnchorConfig {
+        LogAnchorConfig::from_env_map(&crate::api::Config::env_values())
     }
 
     /// Whether anchoring will be attempted.

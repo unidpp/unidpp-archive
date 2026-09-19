@@ -8,17 +8,10 @@
 //! (`?at=...`) are `immutable` and cacheable forever, and snapshot
 //! re-serves carry a strong `ETag` derived from the body digest.
 //!
-//! Endpoints:
-//!
-//! | Endpoint | Meaning |
-//! |---|---|
-//! | `GET /` | discovery document (OAIS mapping, notarization recipe) |
-//! | `GET /healthz` | liveness |
-//! | `GET /keyring` | the notary anchor a verifier pins |
-//! | `POST /snapshots` | ingest: notarize an as-of snapshot (SIP → AIP) |
-//! | `GET /snapshots/{id}` | access: re-serve the AIP byte-identically |
-//! | `GET /snapshots?passport_id=&at=` | data management: as-of listing |
-//! | `GET /admin/log?limit=&offset=` | append-only audit journal |
+//! The endpoint table is the served contract itself: every handler
+//! carries its `#[utoipa::path]` declaration, the document is served
+//! at `/openapi.yaml` (and `/openapi.json`), browsable at `/docs`,
+//! and committed as the golden `openapi.yaml`.
 //!
 //! ## Create flow (OAIS ingest)
 //!
@@ -44,6 +37,8 @@ use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::keyring::Keyring;
 use crate::log_anchor::{self, LogAnchorConfig};
@@ -116,36 +111,68 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The environment variables this service consumes. This is the
+    /// deployment contract: unidpp-config renders exactly these names
+    /// for the archive, and the contract document carries them as
+    /// `x-unidpp-env-keys`. Every environment read flows through this
+    /// constant, including the keyring seed and the transparency-log
+    /// anchoring keys.
+    pub const ENV_KEYS: &'static [&'static str] = &[
+        "UNIDPP_ARCHIVE_BIND",
+        "UNIDPP_ARCHIVE_ADMIN_TOKEN",
+        "UNIDPP_ARCHIVE_STATE_FILE",
+        "UNIDPP_ARCHIVE_SNAPSHOT_DIR",
+        "UNIDPP_ARCHIVE_DEV_SEED",
+        "UNIDPP_ARCHIVE_SIGN_SEED",
+        "UNIDPP_LOG_URL",
+        "UNIDPP_ARCHIVE_LOG_TOKEN",
+        "UNIDPP_ARCHIVE_LOG_TIMEOUT_MS",
+    ];
+
+    /// The environment variables that are set, collected once through
+    /// [`Config::ENV_KEYS`] (the single environment read of the
+    /// service).
+    pub fn env_values() -> HashMap<&'static str, String> {
+        let mut vars: HashMap<&'static str, String> = HashMap::new();
+        for key in Self::ENV_KEYS {
+            if let Ok(value) = std::env::var(key) {
+                vars.insert(*key, value);
+            }
+        }
+        vars
+    }
+
     /// Resolve the configuration from environment variables.
     pub fn from_env() -> Config {
         let mut c = Config::default();
-        if let Ok(bind) = std::env::var("UNIDPP_ARCHIVE_BIND") {
+        let vars = Self::env_values();
+        if let Some(bind) = vars.get("UNIDPP_ARCHIVE_BIND") {
             match bind.parse() {
                 Ok(addr) => c.bind = addr,
                 Err(_) => eprintln!("unidpp-archive: ignoring bad UNIDPP_ARCHIVE_BIND `{bind}`"),
             }
         }
-        if let Ok(token) = std::env::var("UNIDPP_ARCHIVE_ADMIN_TOKEN") {
+        if let Some(token) = vars.get("UNIDPP_ARCHIVE_ADMIN_TOKEN") {
             if !token.is_empty() {
-                c.admin_token = Some(token);
+                c.admin_token = Some(token.clone());
             }
         }
-        if let Ok(path) = std::env::var("UNIDPP_ARCHIVE_STATE_FILE") {
+        if let Some(path) = vars.get("UNIDPP_ARCHIVE_STATE_FILE") {
             if !path.is_empty() {
                 c.state_file = Some(PathBuf::from(path));
             }
         }
-        if let Ok(path) = std::env::var("UNIDPP_ARCHIVE_SNAPSHOT_DIR") {
+        if let Some(path) = vars.get("UNIDPP_ARCHIVE_SNAPSHOT_DIR") {
             if !path.is_empty() {
                 c.snapshot_dir = Some(PathBuf::from(path));
             }
         }
-        if let Ok(seed) = std::env::var("UNIDPP_ARCHIVE_DEV_SEED") {
+        if let Some(seed) = vars.get("UNIDPP_ARCHIVE_DEV_SEED") {
             if !seed.is_empty() {
-                c.dev_seed = Some(seed);
+                c.dev_seed = Some(seed.clone());
             }
         }
-        c.log = LogAnchorConfig::from_env();
+        c.log = LogAnchorConfig::from_env_map(&vars);
         c
     }
 }
@@ -372,6 +399,17 @@ fn parse_create_request(v: &Value) -> Result<CreateRequest, String> {
 // Handlers — discovery / health / keyring
 // ---------------------------------------------------------------------------
 
+/// Serve the discovery document: the service identity, the OAIS
+/// mapping, the notarization recipe, the anchoring semantics, the
+/// storage layout and the entry points.
+#[utoipa::path(
+    get,
+    path = "/",
+    tag = "archive",
+    responses(
+        (status = 200, description = "The discovery document: the service identity and build, the ISO 14721 (OAIS) role mapping, the notarization suite and statement recipe, the anchoring semantics and the explicit unanchored fallback, the journal and snapshot-store layout, the as-of query conventions and the bearer-guard posture", body = Value, content_type = "application/json"),
+    )
+)]
 async fn discovery(State(app): State<Arc<AppState>>) -> Response {
     let body = json!({
         "service": SERVICE_ID,
@@ -444,6 +482,15 @@ async fn discovery(State(app): State<Arc<AppState>>) -> Response {
     )
 }
 
+/// Serve the liveness document.
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "archive",
+    responses(
+        (status = 200, description = "The service is serving; the snapshot count and the anchoring posture are stated", body = Value, content_type = "application/json"),
+    )
+)]
 async fn healthz(State(app): State<Arc<AppState>>) -> Response {
     let size = {
         let store = app.store.lock().expect("store poisoned");
@@ -464,6 +511,15 @@ async fn healthz(State(app): State<Arc<AppState>>) -> Response {
     )
 }
 
+/// Serve the notary keyring a verifier pins.
+#[utoipa::path(
+    get,
+    path = "/keyring",
+    tag = "archive",
+    responses(
+        (status = 200, description = "The notary anchor: the keyring mode, the suite, the key id, the Ed25519 public anchor, the verification recipe and, in seeded-dev mode, the warning", body = Value, content_type = "application/json"),
+    )
+)]
 async fn keyring(State(app): State<Arc<AppState>>) -> Response {
     let mut v = app.keyring.to_json();
     if let Some(m) = v.as_object_mut() {
@@ -481,6 +537,21 @@ async fn keyring(State(app): State<Arc<AppState>>) -> Response {
 // Handlers — ingest (POST /snapshots)
 // ---------------------------------------------------------------------------
 
+/// Ingest a snapshot: the OAIS submission is notarized into the
+/// archival package.
+#[utoipa::path(
+    post,
+    path = "/snapshots",
+    tag = "admin",
+    request_body(content = Value, description = "The SIP: `{\"passport_id\": ..., \"state_hash\": ..., \"log_head\": ...}`; optional `submitter` and `state_size`"),
+    responses(
+        (status = 201, description = "The snapshot is notarized and stored; the AIP document is returned with the `Location`, `ETag`, `X-Snapshot-Id` and `X-As-Of` headers, and `X-Anchored-Receipt` when the transparency log anchored the commitment", body = Value, content_type = "application/json"),
+        (status = 400, description = "Invalid JSON, a missing or malformed `passport_id`, `state_hash` or `log_head`, or an invalid optional field"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+        (status = 409, description = "The storage reports a sequence conflict"),
+        (status = 500, description = "Notarization failed or the storage reported an integrity failure"),
+    )
+)]
 async fn create_snapshot(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -566,6 +637,17 @@ async fn create_snapshot(
 // Handlers — access (GET /snapshots/{id}) and listing
 // ---------------------------------------------------------------------------
 
+/// Re-serve a stored snapshot byte-identically (OAIS access).
+#[utoipa::path(
+    get,
+    path = "/snapshots/{id}",
+    tag = "archive",
+    params(("id" = String, Path, description = "The snapshot identifier, as returned by the ingest response and the as-of catalogue")),
+    responses(
+        (status = 200, description = "The archival package is re-rendered from the journaled record byte-identically; the strong `ETag` pins the body digest and the `X-As-Of` header carries the notarization instant", body = Value, content_type = "application/json"),
+        (status = 404, description = "No snapshot carries the requested identifier"),
+    )
+)]
 async fn get_snapshot(State(app): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let id = id.trim().to_string();
     let found = {
@@ -590,6 +672,20 @@ async fn get_snapshot(State(app): State<Arc<AppState>>, Path(id): Path<String>) 
     }
 }
 
+/// List the snapshots in the as-of catalogue (OAIS data management).
+#[utoipa::path(
+    get,
+    path = "/snapshots",
+    tag = "archive",
+    params(
+        ("passport_id" = Option<String>, Query, description = "List only the snapshots of this passport"),
+        ("at" = Option<String>, Query, description = "An RFC 3339 instant; the catalogue is evaluated as of that instant (alias: `asof`), and the answer is immutable and cacheable forever"),
+    ),
+    responses(
+        (status = 200, description = "The catalogue: every snapshot notarized at or before the effective instant, with the query echo, the count, the fixity digests, the anchoring summary and the per-snapshot `href`", body = Value, content_type = "application/json"),
+        (status = 400, description = "The `at` parameter is not a parseable instant"),
+    )
+)]
 async fn list_snapshots(
     State(app): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -640,6 +736,20 @@ async fn list_snapshots(
 // Handlers — admin
 // ---------------------------------------------------------------------------
 
+/// Read the append-only audit journal.
+#[utoipa::path(
+    get,
+    path = "/admin/log",
+    tag = "admin",
+    params(
+        ("limit" = Option<u64>, Query, description = "Records to return (default 100, maximum 10 000)"),
+        ("offset" = Option<u64>, Query, description = "Records to skip (default 0)"),
+    ),
+    responses(
+        (status = 200, description = "The journal window", body = Value, content_type = "application/json"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_log(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -670,17 +780,77 @@ async fn admin_log(
 }
 
 // ---------------------------------------------------------------------------
+// Interface contract
+// ---------------------------------------------------------------------------
+
+/// The routed paths, declared once. The router routes by these
+/// constants, the contract document is tested against them, and no
+/// route may be declared with a raw literal (the gates enforce both).
+pub mod paths {
+    pub const ROOT: &str = "/";
+    pub const HEALTHZ: &str = "/healthz";
+    pub const KEYRING: &str = "/keyring";
+    pub const SNAPSHOTS: &str = "/snapshots";
+    pub const SNAPSHOT: &str = "/snapshots/{id}";
+    pub const ADMIN_LOG: &str = "/admin/log";
+    /// The contract document itself (not an operation of the API).
+    pub const CONTRACT_YAML: &str = "/openapi.yaml";
+}
+
+/// The OpenAPI model: one declaration per handler (`#[utoipa::path]`),
+/// from which the served contract, the golden file and Swagger UI all
+/// derive.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "UniDPP archive",
+        version = env!("CARGO_PKG_VERSION"),
+        description = "UniDPP Tier-C notarized archive: as-of snapshot packs with ISO 14721 (OAIS) submission, information-package and provenance metadata, Ed25519 notarization in the tree-head domain, optional transparency-log anchoring with an explicit unanchored fallback, byte-identical re-serving pinned by strong entity tags, and an append-only audit journal. Reads are public; ingest and the audit journal require `Authorization: Bearer <UNIDPP_ARCHIVE_ADMIN_TOKEN>` where a token is configured.",
+        license(name = "Apache-2.0", identifier = "Apache-2.0"),
+    ),
+    paths(
+        discovery, healthz, keyring, create_snapshot, get_snapshot,
+        list_snapshots, admin_log,
+    ),
+    tags(
+        (name = "archive", description = "The public surface: discovery, health, the notary keyring, snapshot access and the as-of catalogue"),
+        (name = "admin", description = "The bearer-guarded surface: OAIS ingest and the audit journal"),
+    )
+)]
+struct ApiDoc;
+
+/// The contract document: the OpenAPI model plus the deployment keys
+/// (`x-unidpp-env-keys`). Served at `/openapi.yaml` and committed as
+/// the golden `openapi.yaml`.
+pub fn contract_yaml() -> String {
+    let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("contract serializes");
+    doc["info"]["x-unidpp-env-keys"] = json!(Config::ENV_KEYS);
+    serde_yaml::to_string(&doc).expect("contract renders as YAML")
+}
+
+async fn openapi_yaml() -> Response {
+    build_response(
+        StatusCode::OK,
+        vec![("content-type".into(), "application/yaml".into())],
+        contract_yaml(),
+        CachePolicy::Current,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Router + run
 // ---------------------------------------------------------------------------
 
 pub fn router(app: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(discovery))
-        .route("/healthz", get(healthz))
-        .route("/keyring", get(keyring))
-        .route("/snapshots", get(list_snapshots).post(create_snapshot))
-        .route("/snapshots/{id}", get(get_snapshot))
-        .route("/admin/log", get(admin_log))
+        .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
+        .route(paths::ROOT, get(discovery))
+        .route(paths::HEALTHZ, get(healthz))
+        .route(paths::KEYRING, get(keyring))
+        .route(paths::SNAPSHOTS, get(list_snapshots).post(create_snapshot))
+        .route(paths::SNAPSHOT, get(get_snapshot))
+        .route(paths::ADMIN_LOG, get(admin_log))
+        .route(paths::CONTRACT_YAML, get(openapi_yaml))
         .with_state(app)
 }
 
@@ -850,5 +1020,144 @@ mod tests {
             cache_for(Some(Timestamp::UNIX_EPOCH)),
             CachePolicy::PointInTime
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contract gates
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod contract_gates {
+    use super::*;
+    use crate::http::{request, Url};
+    use std::time::Duration;
+
+    /// The contract form of a routed path: the router's tail
+    /// wildcard (`{*identifier}`) is a captured parameter in the
+    /// document (`{identifier}`). This service declares no tail
+    /// wildcard today; the normalization is kept for family
+    /// uniformity.
+    fn to_doc(path: &str) -> String {
+        path.replace("{*", "{")
+    }
+
+    /// The contract paths with their documented methods.
+    fn documented() -> std::collections::BTreeMap<String, Vec<String>> {
+        let doc: Value = serde_yaml::from_str(&contract_yaml()).expect("contract parses");
+        doc["paths"]
+            .as_object()
+            .expect("paths object")
+            .iter()
+            .map(|(path, item)| {
+                let methods = VERBS
+                    .iter()
+                    .filter(|v| item.get(*v).is_some())
+                    .map(|v| v.to_string())
+                    .collect();
+                (path.clone(), methods)
+            })
+            .collect()
+    }
+
+    const VERBS: [&str; 5] = ["get", "post", "put", "delete", "patch"];
+
+    /// The routed paths, from the constants the router routes by
+    /// (the contract route itself carries no operation).
+    fn routed() -> Vec<&'static str> {
+        [
+            paths::ROOT,
+            paths::HEALTHZ,
+            paths::KEYRING,
+            paths::SNAPSHOTS,
+            paths::SNAPSHOT,
+            paths::ADMIN_LOG,
+        ]
+        .to_vec()
+    }
+
+    #[test]
+    fn the_golden_matches_the_committed_contract() {
+        assert_eq!(contract_yaml(), include_str!("../openapi.yaml"));
+    }
+
+    #[test]
+    #[ignore = "regenerates openapi.yaml after a route change: cargo test -- --ignored export"]
+    fn export_golden() {
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yaml"),
+            contract_yaml(),
+        )
+        .expect("golden written");
+    }
+
+    #[test]
+    fn every_routed_path_is_documented() {
+        let doc = documented();
+        for path in routed() {
+            let key = to_doc(path);
+            assert!(
+                doc.contains_key(&key),
+                "routed but undocumented: {path} (contract speaks `{key}`)"
+            );
+        }
+    }
+
+    #[test]
+    fn every_documented_path_is_routed() {
+        let routed: Vec<String> = routed().iter().map(|p| to_doc(p)).collect();
+        for path in documented().keys() {
+            assert!(routed.contains(path), "documented but not routed: {path}");
+        }
+    }
+
+    #[test]
+    fn routes_are_declared_by_constant_not_literal() {
+        let src = include_str!("api.rs");
+        assert_eq!(
+            src.matches(".route(\"").count(),
+            0,
+            "route paths come from the paths:: constants"
+        );
+    }
+
+    /// The behavioral half: every documented operation answers
+    /// anything but 405, and every undocumented method on a documented
+    /// path answers 405 — on the live router.
+    #[tokio::test]
+    async fn the_router_serves_the_contract_exactly() {
+        let ts = TestServer::spawn(Config::default())
+            .await
+            .expect("test server");
+        for (path, methods) in documented() {
+            let concrete = path.replace("{id}", "probe-x");
+            for verb in VERBS {
+                let resp = request(
+                    &verb.to_uppercase(),
+                    &Url::parse(&format!("{}{concrete}", ts.base_url)).expect("probe url"),
+                    &[],
+                    if verb == "get" {
+                        None
+                    } else {
+                        Some(b"{}".as_slice())
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+                .expect("probe answered");
+                if methods.contains(&verb.to_string()) {
+                    assert_ne!(
+                        resp.status, 405,
+                        "{verb} {concrete}: the contract says routed, the router says otherwise"
+                    );
+                } else {
+                    assert_eq!(
+                        resp.status, 405,
+                        "{verb} {concrete}: served but not in the contract"
+                    );
+                }
+            }
+        }
+        ts.stop().await;
     }
 }
