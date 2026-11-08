@@ -180,6 +180,62 @@ impl LogTransport for HttpLog {
     }
 }
 
+/// The embedder's bridge: the log module's own axum router served
+/// through tower. The POST keeps the loopback client's semantics (2xx
+/// receipt verbatim, refusal with the status and snippet, transport
+/// failure as unreachable) — by construction. The bearer is the same
+/// append token the HTTP client would have sent (the log's append
+/// guard stays in force on the in-process path).
+pub struct InProcessLog {
+    pub router: axum::Router,
+    pub bearer: Option<String>,
+}
+
+impl LogTransport for InProcessLog {
+    fn anchor<'a>(
+        &'a self,
+        subject: &'a str,
+        commitment: Hash,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let body = json!({
+                "subject": subject,
+                "commitment": commitment.hex(),
+            });
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/commitments")
+                .header("content-type", "application/json");
+            if let Some(bearer) = &self.bearer {
+                request = request.header("authorization", format!("Bearer {bearer}"));
+            }
+            let request = request
+                .body(axum::body::Body::from(body.to_string()))
+                .map_err(|e| format!("log anchoring request: {e}"))?;
+            use tower::util::ServiceExt;
+            let resp = ServiceExt::oneshot(&mut self.router.clone(), request)
+                .await
+                .map_err(|e| format!("log unreachable: {e}"))?;
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+                .await
+                .map_err(|e| format!("log receipt body: {e}"))?;
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            if !status.is_success() {
+                let snippet: String = text.chars().take(200).collect();
+                let detail = if snippet.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {snippet}")
+                };
+                return Err(format!("log refused the commitment: {}{detail}", status));
+            }
+            serde_json::from_str(&text).map_err(|e| format!("log returned a non-JSON receipt: {e}"))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +287,24 @@ mod tests {
         assert!(anchor(&cfg, "s", unidpp_model::sha256(&[b"x"]))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn the_bridge_reports_a_refusal_like_the_client() {
+        // An empty router answers 404: a mounted-but-negative log is
+        // a refusal (surfaced with the status), not unreachability.
+        let bridge = InProcessLog {
+            router: axum::Router::new(),
+            bearer: None,
+        };
+        let err = bridge
+            .anchor("s", unidpp_model::sha256(&[b"x"]))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("log refused the commitment: 404"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

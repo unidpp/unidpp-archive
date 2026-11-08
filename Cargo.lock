@@ -1368,6 +1368,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
+ "tower",
  "unidpp-log",
  "unidpp-model",
  "unidpp-signatif",
