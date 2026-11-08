@@ -143,6 +143,43 @@ pub async fn anchor(
         .map_err(|e| format!("log returned a non-JSON receipt: {e}"))
 }
 
+/// The transport boundary of the archive→log edge (REARCH R7):
+/// exactly the one commitment POST, nothing more. The default
+/// implementation is the loopback HTTP client ([`HttpLog`]); the one
+/// deployment injects an in-process bridge over the log module's own
+/// router instead, and the edge stops touching sockets.
+pub trait LogTransport: Send + Sync {
+    fn anchor<'a>(
+        &'a self,
+        subject: &'a str,
+        commitment: Hash,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>;
+}
+
+/// The loopback HTTP implementation: [`anchor`] over the configured
+/// [`LogAnchorConfig`].
+#[derive(Debug, Clone, Default)]
+pub struct HttpLog {
+    pub config: LogAnchorConfig,
+}
+
+impl From<LogAnchorConfig> for HttpLog {
+    fn from(config: LogAnchorConfig) -> HttpLog {
+        HttpLog { config }
+    }
+}
+
+impl LogTransport for HttpLog {
+    fn anchor<'a>(
+        &'a self,
+        subject: &'a str,
+        commitment: Hash,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    {
+        Box::pin(async move { anchor(&self.config, subject, commitment).await })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +231,24 @@ mod tests {
         assert!(anchor(&cfg, "s", unidpp_model::sha256(&[b"x"]))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn the_http_transport_matches_the_free_function() {
+        let http: std::sync::Arc<dyn LogTransport> =
+            std::sync::Arc::new(HttpLog::from(LogAnchorConfig::disabled()));
+        let via_trait = http
+            .anchor("s", unidpp_model::sha256(&[b"x"]))
+            .await
+            .unwrap_err();
+        let direct = anchor(
+            &LogAnchorConfig::disabled(),
+            "s",
+            unidpp_model::sha256(&[b"x"]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(via_trait, direct);
+        assert!(via_trait.contains("not configured"));
     }
 }

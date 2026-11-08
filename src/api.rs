@@ -109,7 +109,6 @@ impl Default for Config {
         }
     }
 }
-
 impl Config {
     /// The environment variables this service consumes. This is the
     /// deployment contract: unidpp-config renders exactly these names
@@ -189,6 +188,10 @@ pub struct AppState {
     /// so sequences and journal order cannot interleave across
     /// concurrent requests. Tokio mutex: the anchor hop awaits.
     mutations: tokio::sync::Mutex<()>,
+    /// The anchoring transport (REARCH R7): `None` uses the loopback
+    /// HTTP client against [`Config::log`]; the one deployment injects
+    /// an in-process bridge over the log module's own router.
+    pub log_bridge: Option<std::sync::Arc<dyn crate::log_anchor::LogTransport>>,
 }
 
 impl AppState {
@@ -202,7 +205,18 @@ impl AppState {
             store: Mutex::new(store),
             keyring,
             mutations: tokio::sync::Mutex::new(()),
+            log_bridge: None,
         })
+    }
+
+    /// Inject the anchoring transport (the embedder's in-process
+    /// bridge; REARCH R7).
+    pub fn with_log_bridge(
+        mut self,
+        bridge: std::sync::Arc<dyn crate::log_anchor::LogTransport>,
+    ) -> AppState {
+        self.log_bridge = Some(bridge);
+        self
     }
 }
 
@@ -589,7 +603,11 @@ async fn create_snapshot(
     // The optional anchoring hop (awaits — hence the tokio lock).
     let commitment = record.commitment();
     let subject = format!("urn:unidpp:archive:snapshot:{}", record.snapshot_id);
-    let anchoring = match log_anchor::anchor(&app.config.log, &subject, commitment).await {
+    let anchor_attempt = match &app.log_bridge {
+        Some(bridge) => bridge.anchor(&subject, commitment).await,
+        None => log_anchor::anchor(&app.config.log, &subject, commitment).await,
+    };
+    let anchoring = match anchor_attempt {
         Ok(receipt) => match anchor_summary_from_receipt(&receipt) {
             Ok(summary) => Anchoring::anchored(summary, receipt, commitment),
             Err(e) => Anchoring::unanchored(format!("log receipt rejected: {e}")),

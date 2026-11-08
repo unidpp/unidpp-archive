@@ -86,7 +86,7 @@ pub mod time;
 pub use api::{run, Config, TestServer};
 pub use hex::{hex_decode, hex_encode};
 pub use keyring::{Keyring, KeyringMode};
-pub use log_anchor::LogAnchorConfig;
+pub use log_anchor::{HttpLog, LogAnchorConfig, LogTransport};
 pub use model::{Anchoring, AnchoringStatus, SnapshotRecord};
 pub use store::{SnapshotStore, StoreError};
 pub use time::Timestamp;
